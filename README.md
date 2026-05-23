@@ -76,6 +76,7 @@ cond if … then
 cond if … else … then
 begin … cond until        \ loops while cond is falsy
 begin … again             \ infinite loop
+limit start do … loop     \ counted loop; `i` reads the innermost index
 exit                      \ early return from a word
 
 \ Misc primitives
@@ -101,6 +102,7 @@ examples/*.asm      reference disassembly of the NPC bots
 0x0000..0x0006   bootstrap: Push <main>; CallAbsolute; Halt
 0x0007..         prelude word bodies, then user word bodies & data
 ...
+0x7FD0..0x7FEF   do/loop scratch (index+limit per nesting level, max 4)
 0x7FF0..0x7FFF   scratch (used by swap/nip/rot)
 0x8000..0xFFFF   stack (grows upward, per the VM spec)
 ```
@@ -113,10 +115,11 @@ allocated in the code/data region right after the prelude.
 
 This is a skeleton. Working: stack ops, arithmetic, comparisons,
 syscalls, `:`/`;`, `variable`/`constant`, `if`/`else`/`then`,
-`begin`/`until`, `begin`/`again`, `exit`, automatic short/long jump
-encoding, disassembler with labels and conditional-jump pattern
-recognition.
+`begin`/`until`, `begin`/`again`, `do`/`loop` (with `i`, max 4
+nesting levels), `exit`, forward references between words,
+automatic short/long jump encoding, disassembler with labels and
+conditional-jump pattern recognition.
 
-Not yet: `do`/`loop` counted loops, forward references, compile-time
+Not yet: `+loop`/`leave`/`?do`, `j` (outer-loop index), compile-time
 arithmetic, named labels in disassembly (a `.sym` file would solve
 this).
