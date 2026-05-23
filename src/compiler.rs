@@ -760,7 +760,7 @@ impl Compiler {
         if self.code.len() > MAX_CODE_END {
             return Err(format!(
                 "binary too large: {} bytes (max {} = 0x{:04x}; \
-                 higher would let the return stack at 0x7000..0x7FC4 \
+                 higher would let the return stack at 0x7000..0x7FC7 \
                  overwrite code/data at runtime)",
                 self.code.len(), MAX_CODE_END, MAX_CODE_END));
         }

@@ -49,31 +49,37 @@ not error). Memory addresses wrap mod 64 KB.
 5. **Upload** `bots/mybot.bin` on the LiveCTF Bots page.
 
 Working examples live in `examples/` — they're real bots that have been
-deployed. Read `samira_v3.fth` for a complete worked example with status
-parsing, wall queries, target selection, and a main loop.
+deployed. `samira_v3.fth` is the most recent and has the most-current
+syscall numbers; older versions exist for reference but may use stale
+numbers. Always cross-check syscall numbers against the live VM spec
+before reusing wrapper definitions from any example.
 
 ## Skeleton
 
-```forth
-\ Buffers in data-stack-safe high memory (above your code, below the stack).
-constant status-buf  0x9000
-constant bounds-buf  0x9040
+Replace `STATUS-NUM`, `INPUT-NUM`, etc. with the current syscall numbers
+from the live spec — they shift between phases.
 
-\ Constants for triggers (see spec for the bit layout).
+```forth
+\ Buffers placed inside the data-stack region; safe as long as your stack
+\ depth never reaches them (it almost never does in typical bots).
+constant status-buf  0x9000
+
+\ Trigger bits (see VM spec — these have been stable).
 constant FIRE        1
 
 \ State.
 variable cooldown variable mode
 
-\ Syscalls — wrap them so the call sites read naturally.
-: read-status   status-buf 1 1 syscall drop ;
-: fire          ( x y dir -- )  FIRE 4 2 syscall drop ;
+\ Syscall wrappers. Stack effects list args in PUSH ORDER, so the rightmost
+\ (TOS) is the FIRST spec arg. Replace the syscall numbers below.
+: read-status   ( buf -- )                 1 STATUS-NUM syscall drop ;
+: fire          ( triggers dir y x -- )    4 INPUT-NUM  syscall drop ;
 
 \ Per-tick logic.
 : tick
-    read-status
+    status-buf read-status
     \ … decide based on status buffer …
-    0 0 0 fire ;        \ shoot east at origin (placeholder)
+    FIRE 0 0 0  fire ;     \ fire in +X direction, no move (x=0, y=0 are deltas)
 
 : main  begin tick again ;
 ```
@@ -87,21 +93,35 @@ Notice:
   yields your bot when a syscall is invoked; you implicitly halt when the
   game tells you to.
 
-## Syscall recipes
+## Syscall convention
 
-Every syscall pushes args in **reverse order** (first arg ends up on TOS),
-then `argc`, then sysnum, then `syscall`. Returns one i32 on TOS.
+> **Syscall numbers and arg layouts change between phases.** Always look
+> up the current numbers in the [live VM spec](https://play.livectf.com/docs)
+> rather than copying from this file or older example bots.
 
-| Syscall | Wrapper |
-|---------|---------|
-| 0 Debug | `: dbg  ( vals… count -- )  0 syscall drop ;` |
-| 1 Status | `: read-status  ( buf -- )  1 1 syscall drop ;` |
-| 2 Input | `: fire  ( x y dir triggers -- )  4 2 syscall drop ;` |
-| 3 ReadWalls | `: read-walls  ( bounds-addr result-addr -- )  2 3 syscall drop ;` |
-| 4 ReadPlayers | `: read-players  ( bounds-addr result-addr result-count-addr -- )  3 4 syscall drop ;` |
+The calling convention itself is stable: push args in **reverse spec
+order** (so the first spec arg ends up on TOS), then `argc`, then the
+syscall number, then `syscall`. The VM pops all of them and pushes one
+i32 return value.
 
-The Input syscall (2) returns a **packed position** `(x & 0xFFFF) | (y << 16)`,
-both halves i16. To unpack to i32:
+For a syscall with spec args `(a, b, c, d)` in that order, the push
+sequence is `d c b a  4 N  syscall`, where `N` is the syscall number.
+This is the only spec-correctness pitfall — the LAST thing you push
+(`a`) ends up on TOS, which the VM interprets as the FIRST spec arg.
+
+A typical wrapper, sketched abstractly:
+
+```forth
+\ Wrapper for a 4-arg syscall. Stack effect lists args in PUSH ORDER,
+\ so the rightmost (TOS) is the FIRST spec arg.
+: my-syscall  ( argN … arg2 arg1 -- retval )  4 N syscall ;
+```
+
+Some bots prefer fixed-shape wrappers that bake in the constants and
+take no user args — see the example bots in `examples/`.
+
+The Input syscall returns a **packed position** `(x & 0xFFFF) | (y << 16)`,
+both halves i16. The packing has been stable across phases. To unpack to i32:
 
 ```forth
 : sign-ext16  dup 0x8000 and if 0xFFFF0000 or then ;
@@ -133,7 +153,7 @@ The full list of 14 gotchas is in `LANGUAGE.md`.
 
 ## Verifying behavior before you upload
 
-The test suite (`cargo test`) compiles and runs **267+ unit tests** covering
+The test suite (`cargo test`) compiles and runs **250+ unit tests** covering
 the compiler and the VM spec. If you discover a Forth pattern that
 surprised you, write the test the same way `tests/run.rs` does:
 

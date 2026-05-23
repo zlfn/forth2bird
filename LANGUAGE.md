@@ -142,16 +142,19 @@ val addr !     ( -- )             store 4 bytes
 ## Syscalls
 
 ```forth
-\ Push args in REVERSE order so the first arg lands on TOS,
-\ then argc, then syscall number, then `syscall`. One return value
+\ Push args in REVERSE spec order so the first spec arg lands on TOS,
+\ then argc, then the syscall number, then `syscall`. One return value
 \ ends up on TOS.
 
-\ Example — Input(x=5, y=3, direction=PosX, triggers=Fire):
-1 0 3 5  4 2 syscall
+\ Schematic for a syscall with spec args (a, b, c, d):
+\   d c b a   4 N   syscall            \ pushes d first, a last; N = sysnum
 ```
 
-The `syscall` token compiles to opcode `0x0E`. You manage the stack yourself
-per the VM spec.
+Syscall numbers and arg layouts are defined by the [LiveCTF VM
+spec](https://play.livectf.com/docs) and **shift between phases** — look
+them up there rather than hard-coding from older sources. The `syscall`
+token compiles to opcode `0x0E`; everything above it is just stack
+preparation.
 
 ## Other primitives
 
@@ -196,7 +199,8 @@ The two helper routines (`PROLOG_HELPER` at `0x12`, `EPILOG_HELPER` at
 0x0012 — 0x0031    PROLOG_HELPER                                 32 B
 0x0032 — 0x0045    EPILOG_HELPER                                 20 B
 0x0046 — < 0x7000  user code + variables                       ≤28 KB
-0x7000 — 0x7FC4    return stack (grows down from 0x7FC4)        ~4 KB
+0x7000 — 0x7FC7    return-stack region (1010 4-byte slots,
+                   topmost slot at 0x7FC4..0x7FC7, grows down)
 0x7FC8 — 0x7FCB    PROLOG_SCRATCH (helper temp)
 0x7FCC — 0x7FCF    RSP storage (current return-stack pointer)
 0x7FD0 — 0x7FEF    do/loop scratch (4 levels × 8 bytes)
@@ -246,7 +250,7 @@ are in [COOKBOOK.md](COOKBOOK.md).
 10. **Addresses wrap mod 65536.** Be careful with computed addresses.
 11. **`!` and `@` are 4-byte only.** Pack/unpack bytes yourself.
 12. **Max binary is ~28 KB**, not 64 KB. The retstack reservation limits it.
-13. **Position from Syscall 2 needs sign extension.** Both halves are i16.
-    See COOKBOOK for the canonical unpack words.
+13. **Position from the Input syscall needs sign extension.** Both halves
+    are i16. See COOKBOOK for the canonical unpack words.
 14. **Drain order for multi-value returns.** `7 9 r ! q !` stores 9 at r
     (TOS first), then 7 at q. Plan the order or use `swap`/`-rot` first.

@@ -70,8 +70,8 @@ pub const EPILOG_LEN: usize = 6;
 pub const PREAMBLE_LEN: usize = 70;
 
 /// Highest legal end-of-code address. The spec only requires the binary
-/// to fit in 64 KB, but at runtime we use 0x7000..0x7FC4 as a return
-/// stack that grows downward. If code crossed 0x7000, a sufficiently
+/// to fit in 64 KB, but at runtime we use 0x7000..0x7FC7 as a return
+/// stack (topmost slot at 0x7FC4..0x7FC7, growing down). If code crossed 0x7000, a sufficiently
 /// deep call chain would push the return stack down into the code region
 /// and silently corrupt it. Cap code+vars at 0x7000 so the retstack
 /// always has ~1000 frames of clearance.

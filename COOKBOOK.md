@@ -10,21 +10,23 @@ Read [LANGUAGE.md](LANGUAGE.md) first for the token reference.
 
 ## Bot skeleton
 
-The simplest bot main loop. Each `syscall` yields one tick.
+The simplest bot main loop. Each `syscall` yields one tick. Syscall
+numbers shift between phases — replace `STATUS-NUM` with the current
+number from the live VM spec.
 
 ```forth
-: read-status   status-buf 1 1 syscall drop ;
+: read-status   ( buf -- )  1 STATUS-NUM syscall drop ;
 : act           \ decide based on status, then fire/move
                 ... ;
 
 : main
     begin
-        read-status
+        status-buf read-status
         act
     again ;
 ```
 
-## Position pack/unpack (Syscall 2 return value)
+## Position pack/unpack (Input syscall return value)
 
 The Input syscall returns `(x & 0xFFFF) | (y << 16)`, with **x and y both
 i16**. Unpacking requires sign extension on each half — this is the single
@@ -38,10 +40,10 @@ most error-prone step in working with positions.
 : pack-pos      16 lshift  swap  0xFFFF and  or ;     \ x y -- packed
 ```
 
-Usage:
+After the Input syscall returns its packed position:
 
 ```forth
-5 3 0 1   4 2 syscall             \ Input(x=5, y=3, dir=PosX, triggers=Fire)
+\ … your Input syscall call here …
 dup unpack-x  px !                \ stash x
 unpack-y      py !                \ stash y
 ```

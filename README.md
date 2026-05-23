@@ -107,7 +107,7 @@ examples/*.asm      reference disassembly of the NPC bots
 0x0012..0x0031    PROLOG_HELPER (32 B; shared trampoline for `:` entry)
 0x0032..0x0045    EPILOG_HELPER (20 B; shared trampoline for `;`/`exit`)
 0x0046..< 0x7000  user code + variables (max ~28 KB)
-0x7000..0x7FC4    return stack (grows down, ~1010 frames)
+0x7000..0x7FC7    return-stack region (grows down from 0x7FC4, ~1010 frames)
 0x7FC8..0x7FCB    PROLOG_SCRATCH (helper temp)
 0x7FCC..0x7FCF    return-stack pointer storage
 0x7FD0..0x7FEF    do/loop scratch (4 nesting levels × 8 bytes)
