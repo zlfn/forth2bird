@@ -1,8 +1,10 @@
-# livectf-forth
+# Forth2Bird
 
-Forth-style compiler (`fthc`) and disassembler (`fthd`) for the
-[LiveCTF](https://play.livectf.com/) VM — a stack machine with a tiny custom
-bytecode ([docs](https://play.livectf.com/docs)).
+Forth compiler (`fthc`) and disassembler (`fthd`) for the
+DEF CON Quals 34 [LiveCTF](https://play.livectf.com/) VM.
+a stack machine with a tiny custom bytecode ([docs](https://play.livectf.com/docs)).
+
+> The LiveCTF ~~Combat Drone~~ Bird Training Program is a real-time Eagle-of-the-Roost style sHOOT-tern. Teams upload canditate birds, and The Program pits them against each other, to determine who is highest in The Pecking Order. 
 
 ## Build
 
@@ -36,69 +38,7 @@ and decimal, and conditional-jump annotations for the Forth `if`/`until`
 idiom (`PUSH X; MUL; JUMP_REL`).
 
 `examples/wander.asm` and `examples/square.asm` are reference dumps of the
-two NPC bots that ship with the LiveCTF tarball — good for seeing what
-hand-tuned bot bytecode looks like.
-
-## Forth dialect cheat sheet
-
-This is a **subset** of standard Forth — see [LANGUAGE.md](LANGUAGE.md) for
-the precise contract and the missing-word list, and [COOKBOOK.md](COOKBOOK.md)
-for canonical idioms.
-
-```forth
-\ Literals
-42 -7 0xFF        \ pushed onto stack (smallest encoding chosen)
-
-\ Definitions
-: square ( n -- n² )  dup * ;
-
-\ Top-level data
-variable counter      \ allocates 4 bytes; pushes its address
-constant SCRATCH 0x7FF0
-
-\ Arithmetic / bit ops
-+ - * / mod   and or xor   lshift rshift
-not invert negate
-
-\ Comparisons (each pops 2, pushes 0/1)
-<  <=  >  >=  =  <>
-
-\ Stack manipulation (from prelude)
-dup drop over swap nip tuck rot -rot 2dup 2drop
-
-\ Memory
-@      \ ( addr -- value )       load 4 bytes
-!      \ ( value addr -- )       store 4 bytes
-
-\ Syscalls (push args reverse, then argc, then sysnum)
-\   Status:  result-addr 1 1 syscall
-\   Input:   x y dir triggers 4 2 syscall
-syscall
-
-\ Control flow
-cond if … then
-cond if … else … then
-begin … cond until        \ loops while cond is falsy
-begin … again             \ infinite loop
-limit start do … loop     \ counted loop; `i` reads the innermost index
-exit                      \ early return from a word
-
-\ Misc primitives
-halt skip
-```
-
-`main` is the entry point — bootstrap calls it and halts on return.
-
-## Layout
-
-```
-src/main.rs         compiler driver (fthc)
-src/bin/fthd.rs     disassembler driver (fthd)
-src/lib.rs          shared opcode constants
-src/prelude.fth     built-in stack words (swap, rot, 2dup, ...)
-examples/demo.fth   example bot exercising every compiler feature
-examples/*.asm      reference disassembly of the NPC bots
-```
+two NPC bots that ship with the LiveCTF handout.
 
 ## Memory map (this compiler's convention)
 
@@ -133,21 +73,3 @@ are emitted once in the preamble.
   bit twiddling, numeric algorithms, etc.
 - **[LiveCTF VM spec](https://play.livectf.com/docs)** — opcode table,
   syscall numbers and arg layouts, memory layout.
-
-## Status
-
-Stable. ~200 unit and integration tests cover the compiler and the spec.
-
-Working: stack ops, arithmetic, comparisons, syscalls, `:`/`;`,
-`variable`/`constant`, `if`/`else`/`then`, `begin`/`until`,
-`begin`/`again`, `do`/`loop` (with `i`, max 4 nesting levels), `exit`,
-forward references between words, automatic short/long jump encoding,
-auto-emitted prolog/epilog calling convention with shared trampoline
-helpers, return stack for deep / mutual recursion, disassembler with
-labels and conditional-jump pattern recognition.
-
-Not yet (see LANGUAGE.md for the full gap list): `+loop`/`leave`/`?do`,
-`j` (outer-loop index), return-stack manipulation (`>r`/`r>`/`r@`),
-strings / char literals, byte-level memory (`c@`/`c!`), convenience math
-words (`1+`, `2*`, `min`, `max`, `abs`, `?dup`), compile-time arithmetic,
-named labels in disassembly (a `.sym` file would solve this).
