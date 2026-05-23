@@ -1,0 +1,11 @@
+[package]
+name = "livectf-forth"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "fthc"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
