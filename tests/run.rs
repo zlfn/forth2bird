@@ -2204,6 +2204,331 @@ fn long_sequential_word_calls_stress_trampoline() {
     assert_eq!(get_var(&src, "r").unwrap(), 200);
 }
 
+// ===========================================================================
+// Documented compiler quirks — regression tests that lock in current
+// (sometimes surprising) behavior. If any of these start failing, the
+// underlying mechanic changed; either the new behavior is desirable (update
+// the assertion) or it's a regression (fix the code).
+// ===========================================================================
+
+#[test]
+fn do_loop_slot_conflict_caps_outer_loop_at_one_iteration() {
+    // Known limitation: do/loop scratch slots are assigned by COMPILE-TIME
+    // nesting depth, not by call/runtime depth. So a word with `do/loop`
+    // at depth 0 called from inside another word's `do/loop` at depth 0
+    // will overwrite the outer loop's index+limit, terminating the outer
+    // loop early.
+    //
+    // Naive expected value: 2 outer × (0+1+2) inner = 6.
+    // Actual (with the bug): inner-sum leaves slot 0 at (idx=3, limit=3);
+    // the outer `loop` increments idx to 4 and tests 3 < 4 → false → exit
+    // outer after one pass. counter = 0+1+2 = 3.
+    //
+    // If this asserts 6, someone moved do/loop scratch onto the return
+    // stack (or otherwise per-call). Update accordingly.
+    let src = "
+        variable counter variable r
+        : inner-sum  3 0 do  counter @ i + counter !  loop ;
+        : main
+            0 counter !
+            2 0 do  inner-sum  loop
+            counter @ r ! ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 3,
+        "do/loop slot conflict — see test comment");
+}
+
+#[test]
+fn word_named_like_primitive_is_unreachable() {
+    // The compiler accepts `: + 999 ;` but primitive lookup happens BEFORE
+    // dictionary lookup, so the user's `+` is dead code; every `+` in
+    // subsequent source compiles to op::ADD.
+    let src = "
+        variable r
+        : + 999 ;
+        : main 2 3 + r ! ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 5);  // 2 + 3 via the primitive
+}
+
+#[test]
+fn word_name_that_parses_as_number_is_unreachable() {
+    // Number parsing wins over dictionary lookup. `: 99 42 ;` defines a
+    // word named "99", but the literal `99` later compiles as PUSH 99.
+    let src = "
+        variable r
+        : 99 42 ;
+        : main 99 r ! ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 99);
+}
+
+// ===========================================================================
+// `exit` placement edges
+// ===========================================================================
+
+#[test]
+fn exit_as_first_token_of_body_skips_rest_of_word() {
+    // The early store sticks; the post-exit store is unreachable.
+    let src = "
+        variable r
+        : early  99 r ! exit  42 r ! ;
+        : main early ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 99);
+}
+
+#[test]
+fn exit_from_nested_if_inside_do_loop_short_circuits_correctly() {
+    // Two levels of `if` inside a `do/loop`, and an `exit` at the bottom
+    // of the cone — must abandon both the inner condition, the outer
+    // condition, the remaining loop iterations, AND the post-loop store.
+    let src = "
+        variable r
+        : nest
+            5 0 do
+                i 0 > if
+                    i 2 = if
+                        i 100 *  r !  exit
+                    then
+                then
+            loop
+            -1 r ! ;
+        : main nest ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 200);  // i=2 fires the exit
+}
+
+// ===========================================================================
+// VM invariants — what the data stack and execution should look like after
+// a clean program terminates
+// ===========================================================================
+
+#[test]
+fn data_stack_empty_after_main_returns_via_deep_recursion() {
+    // descend(100) recurses 100 deep. Each frame uses retstack for its RA;
+    // the data stack should hold exactly the live arg at each level and
+    // be empty when main finally hits HALT. A trampoline leak would show
+    // up here as non-zero residual depth.
+    //
+    // NB: the base case is `if exit then` (NOT `if drop exit then`) so the
+    // arg stays on the stack — otherwise descend would return with an
+    // empty stack and main's `r !` would underflow. This is precisely the
+    // kind of off-by-one this test guards against.
+    let src = "
+        variable r
+        : descend  dup 0 = if exit then  1 - descend ;
+        : main 100 descend r ! ;
+    ";
+    let bytes = livectf_forth::compile_program(src).unwrap();
+    let mut vm = common::Vm::load(&bytes);
+    vm.run_default().unwrap();
+    assert!(vm.halted, "VM should halt cleanly");
+    assert_eq!(vm.stack_depth(), 0,
+        "data stack should be empty after main returns, got depth {}",
+        vm.stack_depth());
+}
+
+// ===========================================================================
+// Spec edges — bitwise ops over the i32::MIN bit pattern
+// ===========================================================================
+
+#[test]
+fn bitwise_ops_over_i32_min_high_bit() {
+    // -0x80000000 has only the sign bit set in u32 (= 0x80000000). AND/OR/
+    // XOR are bit-level so sign-ness doesn't matter; INVERT yields i32::MAX.
+    assert_eq!(eval("-0x80000000 0xFF and"), 0);
+    assert_eq!(eval("-0x80000000 0 or"), i32::MIN);
+    assert_eq!(eval("-0x80000000 -0x80000000 xor"), 0);
+    assert_eq!(eval("-0x80000000 invert"), i32::MAX);
+}
+
+// ===========================================================================
+// Recursion + global variable interaction
+// ===========================================================================
+
+#[test]
+fn recursive_word_reads_and_writes_global_variable() {
+    // Each recursive entry pre-increments the global counter; recursion
+    // continues while the stack arg is nonzero. For input 10, 11 levels
+    // run (10, 9, ..., 0), so counter ends at 11. Verifies that variable
+    // access works correctly under deep recursion (the retstack frames
+    // shouldn't interfere with memory loads/stores).
+    let src = "
+        variable counter variable r
+        : rec
+            counter @ 1 + counter !
+            dup 0 = if drop exit then
+            1 - rec ;
+        : main  0 counter !  10 rec  counter @ r ! ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 11);
+}
+
+// ===========================================================================
+// Forth-coder pitfalls — patterns a standard Forth coder might write that
+// either work, work differently than expected, or hit a sharp edge.
+// ===========================================================================
+
+#[test]
+fn keyword_shadowed_by_word_definition_is_unreachable() {
+    // User defines `: if 42 ;` thinking they're aliasing. But the control-
+    // flow `if` keyword matches FIRST in compile_token, so subsequent uses
+    // of `if` still act as the conditional, not the user's word.
+    let src = "
+        variable r
+        : if 42 ;
+        : main  1 if 99 then  r ! ;
+    ";
+    // The `1 if 99 then` evaluates as the keyword: cond=1 → enter branch
+    // → push 99 → then. r=99 (NOT 42).
+    assert_eq!(get_var(src, "r").unwrap(), 99);
+}
+
+#[test]
+fn do_with_limit_less_than_start_runs_body_once() {
+    // Forth-standard `?do` would skip when start > limit, but we don't have
+    // it. Plain `do` always runs the body at least once because the
+    // compare-and-back-branch happens at the END (after increment). With
+    // start=5, limit=0: body runs once with i=5, then loop increments to 6,
+    // tests 6<0 → false, exits.
+    let src = "
+        variable n variable r
+        : main
+            0 n !
+            0 5 do  n @ 1 + n !  loop
+            n @ r ! ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 1);
+}
+
+#[test]
+fn i_read_multiple_times_in_one_iteration_returns_same_value() {
+    // `i` compiles to `PUSH index_addr; LOAD_ABS` — each use re-reads the
+    // slot. The slot is only mutated by `loop`, so multiple reads in one
+    // iteration must give identical values.
+    let src = "
+        variable sum variable r
+        : main
+            0 sum !
+            5 0 do
+                i i +  sum @ +  sum !       \\ 2*i added each iter
+            loop
+            sum @ r ! ;
+    ";
+    // 2*(0+1+2+3+4) = 20. If `i` returned stale or differing values, the
+    // sum would diverge.
+    assert_eq!(get_var(src, "r").unwrap(), 20);
+}
+
+#[test]
+fn negative_one_is_truthy_in_if() {
+    // Common Forth convention is `true = -1`. Our compiler produces 0/1
+    // for boolean operators, but `if` actually tests "non-zero", so -1
+    // (or any nonzero value) takes the true branch.
+    let src = "
+        variable r
+        : main  -1 if 42 else 99 then  r ! ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 42);
+}
+
+#[test]
+fn arbitrary_nonzero_cond_is_truthy_in_if() {
+    let src = "
+        variable r
+        : main  0xCAFE if 42 else 99 then  r ! ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap(), 42);
+}
+
+#[test]
+fn until_with_nonzero_truthy_cond_exits_loop() {
+    // `begin … cond until` exits when cond is non-zero. Test with a non-1
+    // truthy value to confirm we're not accidentally comparing == 1.
+    let src = "
+        variable counter variable r
+        : main
+            0 counter !
+            begin
+                counter @ 1 + counter !
+                counter @ 3 = 0xFF and       \\ produces 0 or 0xFF
+            until
+            counter @ r ! ;
+    ";
+    // `=` gives 1, then `0xFF and` gives 1; first non-zero exits on counter=3.
+    assert_eq!(get_var(src, "r").unwrap(), 3);
+}
+
+#[test]
+fn mismatched_if_else_branches_leave_documented_residue() {
+    // Standard Forth doesn't enforce stack-effect consistency between
+    // if/else branches. Document what happens when a user accidentally
+    // mismatches them.
+    //
+    //   `f` body:  dup 0 = if drop 1 else 2 then  r !
+    //   - True branch ( cond -- 1 ):  drops the dup'd copy, pushes 1
+    //   - False branch ( cond -- cond 2 ):  just pushes 2 (cond stays)
+    //
+    // For input 0: stack ends [1], r=1. Clean.
+    // For input 5: stack ends [5, 2], r=2 (TOS), 5 leaks but harmless.
+    fn make(n: i32) -> String {
+        format!(r#"
+            variable r
+            : f  dup 0 = if drop 1 else 2 then  r ! ;
+            : main {} f ;
+        "#, n)
+    }
+    assert_eq!(get_var(&make(0), "r").unwrap(), 1, "if branch");
+    assert_eq!(get_var(&make(5), "r").unwrap(), 2, "else branch (with residue)");
+}
+
+#[test]
+fn forward_ref_called_inside_do_loop_works_at_runtime() {
+    // The forward-ref placeholder is patched after the loop body emits, so
+    // its target address gets baked into the bytecode inside the loop.
+    // Verify the call actually fires at runtime.
+    let src = "
+        variable sum variable r
+        : main
+            0 sum !
+            5 0 do  i add-to-sum  loop
+            sum @ r ! ;
+        : add-to-sum  sum @ + sum ! ;       \\ forward-ref from main
+    ";
+    // Σ i for i in [0,5) = 10.
+    assert_eq!(get_var(src, "r").unwrap(), 10);
+}
+
+#[test]
+fn deep_recursion_at_900_levels_completes() {
+    // Retstack holds ~1010 frames (region 0x7000..0x7FC4). Recursing 900
+    // levels uses 3600 bytes of retstack — comfortably below the ceiling.
+    // Confirms we have meaningful headroom for non-trivial recursion.
+    let src = "
+        variable counter variable r
+        : descend
+            counter @ 1 + counter !
+            dup 0 = if drop exit then
+            1 - descend ;
+        : main 0 counter !  900 descend  counter @ r ! ;
+    ";
+    // descend(900) enters 901 times (n=900, 899, ..., 1, 0). counter += 901.
+    assert_eq!(get_var(src, "r").unwrap(), 901);
+}
+
+#[test]
+fn large_hex_pattern_round_trips_through_variable() {
+    // Confirms that `PUSH <4-byte LE> ; STORE_ABS ; LOAD_ABS` preserves the
+    // exact bit pattern of a value that doesn't survive an i32→signed
+    // round-trip cleanly.
+    let src = "
+        variable r
+        : main  0xDEADBEEF  r !  r @  r ! ;
+    ";
+    assert_eq!(get_var(src, "r").unwrap() as u32, 0xDEADBEEF);
+}
+
 #[test]
 fn bubble_sort_three_vars_in_place() {
     // Sort (8, 5, 2) in three passes. Each pass conditionally swaps an

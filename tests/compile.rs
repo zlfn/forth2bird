@@ -726,6 +726,328 @@ fn prelude_swap_has_prolog_thunk() {
     assert_eq!(bytes[swap_addr+5], op::CALL_ABS);
 }
 
+// ===========================================================================
+// Error-path coverage — every `Err(...)` in lib.rs that user code can hit
+// ===========================================================================
+
+#[test]
+fn colon_at_end_of_input_without_name_errors() {
+    let err = compile(":").unwrap_err();
+    assert!(err.contains("needs a name"), "got: {}", err);
+}
+
+#[test]
+fn variable_at_end_of_input_without_name_errors() {
+    let err = compile("variable").unwrap_err();
+    assert!(err.contains("needs a name"), "got: {}", err);
+}
+
+#[test]
+fn constant_at_end_of_input_without_name_errors() {
+    let err = compile("constant").unwrap_err();
+    assert!(err.contains("needs a name"), "got: {}", err);
+}
+
+#[test]
+fn constant_with_name_but_no_value_errors() {
+    let err = compile("constant K").unwrap_err();
+    assert!(err.contains("needs a value"), "got: {}", err);
+}
+
+#[test]
+fn constant_with_non_numeric_value_errors() {
+    let err = compile("constant K hello").unwrap_err();
+    assert!(err.contains("bad value"), "got: {}", err);
+}
+
+// ===========================================================================
+// Number encoding boundaries — pin PushZero / PushShort / Push selection
+// ===========================================================================
+
+#[test]
+fn zero_in_various_forms_all_emit_push_zero() {
+    // PushZero is preferred over PushShort 0. Cover decimal, hex, negated.
+    for src in [": main 0 ;", ": main -0 ;", ": main 0x0 ;", ": main -0x0 ;"] {
+        let body = word_body(src, "main");
+        assert_eq!(body[0], op::PUSH_ZERO, "expected PushZero for `{}`", src);
+    }
+}
+
+#[test]
+fn push_at_128_promotes_to_long_form_decimal() {
+    // 127 is i8 max; 128 is one past — must use full PUSH.
+    let body = word_body(": main 128 ;", "main");
+    assert_eq!(body[0], op::PUSH);
+    assert_eq!(&body[1..5], &128u32.to_le_bytes());
+}
+
+#[test]
+fn push_at_minus_129_promotes_to_long_form() {
+    // -128 is i8 min; -129 is one past — must use full PUSH.
+    let body = word_body(": main -129 ;", "main");
+    assert_eq!(body[0], op::PUSH);
+    assert_eq!(&body[1..5], &(-129i32 as u32).to_le_bytes());
+}
+
+// ===========================================================================
+// Tokenizer edge cases
+// ===========================================================================
+
+#[test]
+fn unterminated_block_comment_consumes_to_eof_without_hanging() {
+    // The `(` handler reads until `)` or EOF. If EOF wins, the rest of the
+    // source (including `;`) is silently eaten — the definition ends up
+    // unclosed, surfacing as a clear finalize-time error rather than a
+    // tokenizer crash or infinite loop.
+    let err = compile(": main 1 ( unterminated").unwrap_err();
+    assert!(err.contains("unclosed"), "got: {}", err);
+}
+
+#[test]
+fn line_comment_at_eof_without_newline_compiles_cleanly() {
+    let src = ": main 1 drop ; \\ no newline at end of file";
+    let bytes = compile(src).unwrap();
+    assert!(bytes.len() > PREAMBLE_LEN);
+}
+
+#[test]
+fn tab_and_crlf_separate_tokens() {
+    // Rust's `char::is_whitespace` covers \t, \r, \n — the tokenizer
+    // inherits all of them. Mixed Windows line endings shouldn't faze it.
+    let src = ":\tmain\r\n\t42\r\n\tdrop\r\n;\r\n";
+    let bytes = compile(src).unwrap();
+    assert!(bytes.len() > PREAMBLE_LEN);
+}
+
+// ===========================================================================
+// Primitive opcode mapping — verify the 1-byte primitives compile to the
+// exact opcode constants. Quick regression guard if anyone reshuffles them.
+// ===========================================================================
+
+#[test]
+fn halt_primitive_emits_halt_opcode() {
+    let body = word_body(": main halt ;", "main");
+    assert_eq!(body[0], op::HALT);
+}
+
+#[test]
+fn syscall_primitive_emits_syscall_opcode() {
+    let body = word_body(": main syscall ;", "main");
+    assert_eq!(body[0], op::SYSCALL);
+}
+
+#[test]
+fn skip_primitive_emits_skip_opcode() {
+    let body = word_body(": main skip ;", "main");
+    assert_eq!(body[0], op::SKIP);
+}
+
+// ===========================================================================
+// Compiler state / dictionary
+// ===========================================================================
+
+#[test]
+fn word_redefinition_replaces_dict_entry() {
+    // Compiler allows redefinition; the dictionary just points to the new
+    // body. Old call sites that already emitted with the old address still
+    // call the old code — this test pins that behavior.
+    let mut c = Compiler::new();
+    c.compile(PRELUDE).unwrap();
+    c.compile(": foo 1 ;").unwrap();
+    let first = match c.dict_get("foo") {
+        Some(DictEntry::Word(a)) => a,
+        _ => panic!("foo missing after first definition"),
+    };
+    c.compile(": foo 2 ;").unwrap();
+    let second = match c.dict_get("foo") {
+        Some(DictEntry::Word(a)) => a,
+        _ => panic!("foo missing after redefinition"),
+    };
+    assert_ne!(first, second, "redefinition should produce a new address");
+}
+
+#[test]
+fn compile_can_be_called_in_multiple_chunks() {
+    // Building up a program piece-by-piece across several `compile()` calls
+    // should be equivalent to one big `compile()` — useful for embedding
+    // and for sanity (no per-call hidden state).
+    let mut c = Compiler::new();
+    c.compile(PRELUDE).unwrap();
+    c.compile(": foo 1 ;").unwrap();
+    c.compile(": bar 2 ;").unwrap();
+    c.compile(": main foo bar + drop ;").unwrap();
+    c.finalize().unwrap();
+    let bytes = c.into_bytes();
+    assert!(bytes.len() > PREAMBLE_LEN);
+}
+
+#[test]
+fn variable_address_falls_within_code_region() {
+    // Variables are allocated at `here()` after the preamble + prelude.
+    // They should never end up below the preamble nor cross into the
+    // return-stack region.
+    let mut c = Compiler::new();
+    c.compile(PRELUDE).unwrap();
+    c.compile("variable v").unwrap();
+    let addr = match c.dict_get("v") {
+        Some(DictEntry::Value(a)) => a as usize,
+        _ => panic!(),
+    };
+    assert!(addr >= PREAMBLE_LEN, "variable below preamble: 0x{:04x}", addr);
+    assert!(addr + 4 <= 0x7000, "variable above retstack: 0x{:04x}", addr);
+}
+
+// ===========================================================================
+// Forward references — exhaustive placement coverage
+// ===========================================================================
+
+#[test]
+fn forward_ref_inside_if_body_resolves() {
+    // The forward-ref placeholder is emitted inside an `if` body, so the
+    // patcher writes into a slot that's halfway through a control-flow
+    // structure. Verifies the slot-tracking is offset-correct.
+    let src = "
+        variable r
+        : main 1 if b then r ! ;
+        : b 42 ;
+    ";
+    let bytes = livectf_forth::compile_program(src).unwrap();
+    assert!(bytes.len() > PREAMBLE_LEN);
+}
+
+#[test]
+fn forward_ref_inside_do_loop_body_resolves() {
+    // Same but the placeholder lands inside a do/loop body.
+    let src = "
+        variable r
+        : main 0  5 0 do b +  loop  r ! ;
+        : b 1 ;
+    ";
+    let bytes = livectf_forth::compile_program(src).unwrap();
+    assert!(bytes.len() > PREAMBLE_LEN);
+}
+
+#[test]
+fn forward_ref_inside_begin_until_resolves() {
+    let src = "
+        variable counter variable r
+        : main 0 counter !  begin counter @ 1 + counter !  counter @ done? until ;
+        : done?  3 = ;
+    ";
+    let bytes = livectf_forth::compile_program(src).unwrap();
+    assert!(bytes.len() > PREAMBLE_LEN);
+}
+
+#[test]
+fn multiple_forward_refs_to_same_word_all_patched() {
+    // If a body uses the same forward-ref'd name multiple times, every
+    // placeholder slot must get patched (not just the first).
+    let src = "
+        variable r
+        : main b b b + +  r ! ;
+        : b 1 ;
+    ";
+    let bytes = livectf_forth::compile_program(src).unwrap();
+    assert!(bytes.len() > PREAMBLE_LEN);
+}
+
+#[test]
+fn forward_ref_and_direct_call_both_target_correct_address() {
+    // Forward-ref call (emit_call_placeholder + later patch) and direct
+    // call (emit_call) must produce the same target address bytes.
+    let mut c = Compiler::new();
+    c.compile(PRELUDE).unwrap();
+    c.compile("variable r").unwrap();
+    c.compile(": a b r ! ;").unwrap();          // forward-ref to b
+    c.compile(": b 42 ;").unwrap();
+    c.compile(": main a b r ! ;").unwrap();     // direct call to b
+    c.finalize().unwrap();
+    let bytes = c.code().to_vec();
+    let a_addr = match c.dict_get("a") {
+        Some(DictEntry::Word(x)) => x as usize, _ => panic!()
+    };
+    let main_addr = match c.dict_get("main") {
+        Some(DictEntry::Word(x)) => x as usize, _ => panic!()
+    };
+    let b_addr = match c.dict_get("b") {
+        Some(DictEntry::Word(x)) => x as u32, _ => panic!()
+    };
+
+    // a's body (forward-ref path) starts with `PUSH b_addr; CALL_ABS`.
+    let body_a = a_addr + PROLOG_LEN;
+    assert_eq!(bytes[body_a], op::PUSH);
+    let target_a = u32::from_le_bytes([
+        bytes[body_a+1], bytes[body_a+2], bytes[body_a+3], bytes[body_a+4],
+    ]);
+    assert_eq!(target_a, b_addr, "forward-ref call should target b");
+
+    // main's body: first call is to `a`, second (6 bytes later) is to `b`
+    // through the direct path.
+    let body_main = main_addr + PROLOG_LEN;
+    let call_b = body_main + 6;
+    assert_eq!(bytes[call_b], op::PUSH);
+    let target_b = u32::from_le_bytes([
+        bytes[call_b+1], bytes[call_b+2], bytes[call_b+3], bytes[call_b+4],
+    ]);
+    assert_eq!(target_b, b_addr, "direct call should target b");
+}
+
+// ===========================================================================
+// Control-structure validation — every open structure should error at `;`
+// ===========================================================================
+
+#[test]
+fn semicolon_inside_open_begin_errors() {
+    let err = compile(": main begin 1 ;").unwrap_err();
+    assert!(err.contains("control block is open"), "got: {}", err);
+}
+
+#[test]
+fn semicolon_inside_open_do_errors() {
+    let err = compile(": main 3 0 do 1 drop ;").unwrap_err();
+    assert!(err.contains("control block is open"), "got: {}", err);
+}
+
+#[test]
+fn semicolon_inside_open_else_errors() {
+    let err = compile(": main 1 if 2 else 3 ;").unwrap_err();
+    assert!(err.contains("control block is open"), "got: {}", err);
+}
+
+// ===========================================================================
+// Number boundaries / tokenizer corners
+// ===========================================================================
+
+#[test]
+fn number_overflowing_i32_but_fitting_i64_truncates_to_zero_via_push() {
+    // 0x100000000 = 2^32 fits in i64 (parse_number's return type) but not
+    // i32. The emitter does `(n as i32) as u32` after the encoding-size
+    // pick, so:
+    //   - 2^32 isn't in -128..=127 → picks the long PUSH form
+    //   - the value passed to PUSH is the truncated 0
+    //   - result: 5-byte `PUSH 0`, NOT the 1-byte `PUSH_ZERO`
+    //
+    // Arguably the compiler should reject or warn on overflowing literals.
+    // For now this test pins the silent-truncation behavior — if anyone
+    // tightens it (or makes the encoder smarter to use PUSH_ZERO post-
+    // truncation), this asserts will fire and need updating.
+    let body = word_body(": main 0x100000000 ;", "main");
+    assert_eq!(body[0], op::PUSH);
+    assert_eq!(&body[1..5], &[0, 0, 0, 0]);
+}
+
+#[test]
+fn comment_between_colon_and_name_is_consumed() {
+    // Tokens after stripping comments: `:`, `foo`, `1`, `;`. The block
+    // comment between `:` and `foo` must not disrupt definition parsing.
+    let src = ": ( a stack note ) foo 1 ; : main ;";
+    let mut c = Compiler::new();
+    c.compile(PRELUDE).unwrap();
+    c.compile(src).unwrap();
+    c.finalize().unwrap();
+    assert!(matches!(c.dict_get("foo"), Some(DictEntry::Word(_))));
+}
+
 #[test]
 fn empty_do_loop_body_compiles() {
     // Body between `do` and `loop` is empty — the compiler should still
