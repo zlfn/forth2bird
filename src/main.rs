@@ -162,28 +162,30 @@ impl Compiler {
     // ---- primitives ----
     //
     // Returns true if `tok` was a primitive and bytes have been emitted.
+    //
+    // Operand-order quirk: Forth `a b OP` means "left operand a, right
+    // operand b", i.e. result = NOS OP TOS. The VM's binary ops use the
+    // opposite convention — per the spec, `left = pop()` (TOS), then
+    // `right = pop()` (NOS), so e.g. SUB = TOS - NOS. Commutative ops
+    // hide this disagreement; non-commutative ones need a fixup, handled
+    // in the blocks below. Don't drop `-`/`/`/`mod`/`lshift`/`rshift`/
+    // ordered-comparisons back into the single-opcode table without
+    // re-deriving why they're called out — verified by the glibc LCG
+    // pattern in examples/wander.asm at L00e3.
     fn try_primitive(&mut self, tok: &str) -> bool {
-        // Single-opcode primitives.
+        // Single-opcode primitives — commutative binaries plus everything
+        // that isn't a two-operand arithmetic/compare op.
         let single: Option<u8> = match tok {
             "+"       => Some(op::ADD),
-            "-"       => Some(op::SUB),
             "*"       => Some(op::MUL),
-            "/"       => Some(op::DIV),
-            "mod"     => Some(op::REM),
             "and"     => Some(op::AND),
             "or"      => Some(op::OR),
             "xor"     => Some(op::XOR),
-            "lshift"  => Some(op::SHL),
-            "rshift"  => Some(op::SHR),
+            "="       => Some(op::EQ),
+            "<>"      => Some(op::NE),
             "not"     => Some(op::LOGICAL_NOT),
             "invert"  => Some(op::BITWISE_NOT),
             "negate"  => Some(op::NEG),
-            "<"       => Some(op::LT),
-            "<="      => Some(op::LE),
-            ">"       => Some(op::GT),
-            ">="      => Some(op::GE),
-            "="       => Some(op::EQ),
-            "<>"      => Some(op::NE),
             "drop"    => Some(op::POP),
             "@"       => Some(op::LOAD_ABS),
             "!"       => Some(op::STORE_ABS),
@@ -194,6 +196,44 @@ impl Compiler {
             _ => None,
         };
         if let Some(b) = single {
+            self.emit(&[b]);
+            return true;
+        }
+
+        // Ordered comparisons: emit the reflected opcode so VM's
+        // `left CMP right` = TOS CMP NOS ends up computing what Forth's
+        // `NOS CMP TOS` would. Costs nothing extra.
+        let reflected: Option<u8> = match tok {
+            "<"  => Some(op::GT),
+            "<=" => Some(op::GE),
+            ">"  => Some(op::LT),
+            ">=" => Some(op::LE),
+            _ => None,
+        };
+        if let Some(b) = reflected {
+            self.emit(&[b]);
+            return true;
+        }
+
+        // Subtraction: VM SUB yields TOS - NOS; NEG turns that into the
+        // NOS - TOS that Forth `a b -` expects. 2 bytes, no scratch.
+        if tok == "-" {
+            self.emit(&[op::SUB, op::NEG]);
+            return true;
+        }
+
+        // `/`, `mod`, `lshift`, `rshift` have no single-opcode reflection,
+        // so swap TOS↔NOS via the prelude's `swap` (scratch at 0x7FF0/
+        // 0x7FF4) before emitting the raw opcode.
+        let swap_then: Option<u8> = match tok {
+            "/"      => Some(op::DIV),
+            "mod"    => Some(op::REM),
+            "lshift" => Some(op::SHL),
+            "rshift" => Some(op::SHR),
+            _ => None,
+        };
+        if let Some(b) = swap_then {
+            self.emit_swap_call();
             self.emit(&[b]);
             return true;
         }
@@ -215,6 +255,17 @@ impl Compiler {
         // careful StoreSpRelative sequences.  Left as exercises so the
         // skeleton stays small.
         false
+    }
+
+    // Emit a call to the prelude's `swap`. Invariant: the prelude defines
+    // `swap` as the first user-visible word, so the lookup must succeed by
+    // the time any user code is compiled. If it doesn't, the prelude has
+    // been broken — fail loudly rather than silently miscompiling.
+    fn emit_swap_call(&mut self) {
+        match self.dict.get("swap").copied() {
+            Some(DictEntry::Word(addr)) => self.emit_call(addr),
+            _ => panic!("internal: `swap` missing from dictionary; prelude is required for non-commutative binary ops"),
+        }
     }
 
     // ---- main per-token compile ----
